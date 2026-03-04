@@ -36,7 +36,6 @@
       <option value="audio/">Audio</option>
       <option value="application/pdf">PDF</option>
     </select>
-    <label><input type="checkbox" id="dupesOnly" /> Only show duplicate-content rows</label>
   </div>
 
   <table>
@@ -107,11 +106,9 @@ function occurrencesHtml(e) {
 function render() {
   const q = document.getElementById('search').value.toLowerCase().trim();
   const tf = document.getElementById('typeFilter').value;
-  const dupesOnly = document.getElementById('dupesOnly').checked;
 
   const filtered = entries.filter(e => {
     if (tf && !e.mime_type.startsWith(tf) && e.mime_type !== tf) return false;
-    if (dupesOnly && (hashCounts.get(e.sha256) || 0) < 2) return false;
     if (!q) return true;
     return [e.path, e.filename, e.sha256, e.mime_type, e.extension, e.all_paths_search || '', e.all_occurrence_pages_search || ''].join(' ').toLowerCase().includes(q);
   });
@@ -139,7 +136,7 @@ function render() {
     `Generated: <strong>${generatedAt}</strong> · Source files scanned after risk filter: <strong>${rawFileCount}</strong> · Review rows after variant grouping: <strong>${entries.length}</strong> · Unique content hashes: <strong>${uniqueHashes}</strong> · Duplicate-content rows: <strong>${dupRows}</strong> · Showing: <strong>${filtered.length}</strong>`;
 }
 
-for (const id of ['search','typeFilter','dupesOnly']) document.getElementById(id).addEventListener('input', render);
+for (const id of ['search','typeFilter']) document.getElementById(id).addEventListener('input', render);
 render();
 </script>
 </body>
