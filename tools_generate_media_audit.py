@@ -5,8 +5,10 @@ import mimetypes
 import os
 import re
 import subprocess
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 from typing import Any
 
 ROOT = Path('.')
@@ -179,6 +181,62 @@ def gather_files() -> list[Path]:
     return files
 
 
+def gather_html_files() -> list[Path]:
+    html_files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        if '.git' in dirnames:
+            dirnames.remove('.git')
+        for name in filenames:
+            p = Path(dirpath) / name
+            if p == OUTPUT:
+                continue
+            if p.suffix.lower() in {'.html', '.htm'}:
+                html_files.append(p)
+    html_files.sort()
+    return html_files
+
+
+MEDIA_REF_RE = re.compile(r'[^\s"\'<>]+\.(?:jpe?g|png|gif|webp|svg|bmp|tiff?|ico|avif|mp4|mov|m4v|webm|avi|mkv|wmv|flv|mpe?g|mp3|wav|m4a|ogg|oga|flac|aac|opus|pdf)(?:\?[^\s"\'<>]*)?(?:#[^\s"\'<>]*)?', re.IGNORECASE)
+
+
+def normalize_media_ref(ref: str) -> str | None:
+    s = unquote(ref.strip())
+    if not s:
+        return None
+
+    parts = urlsplit(s)
+    if parts.scheme and parts.scheme not in {'http', 'https'}:
+        return None
+
+    path = parts.path
+    if not path:
+        return None
+    if parts.netloc:
+        path = path.lstrip('/')
+    path = path.lstrip('./')
+    if not path:
+        return None
+    return path
+
+
+def index_media_occurrences(html_files: list[Path]) -> dict[str, list[str]]:
+    occurrences: dict[str, set[str]] = defaultdict(set)
+
+    for html in html_files:
+        rel_html = html.as_posix().lstrip('./')
+        try:
+            txt = html.read_text(encoding='utf-8', errors='ignore')
+        except Exception:
+            continue
+
+        for m in MEDIA_REF_RE.finditer(txt):
+            normalized = normalize_media_ref(m.group(0))
+            if normalized:
+                occurrences[normalized].add(rel_html)
+
+    return {k: sorted(v) for k, v in occurrences.items()}
+
+
 def is_likely_design_asset(path: Path) -> bool:
     p = '/' + path.as_posix().lower().lstrip('./')
     name = path.name.lower()
@@ -211,7 +269,7 @@ def image_sort_score(entry: dict[str, Any]) -> tuple[int, int]:
     return (0, entry.get('size_bytes', 0))
 
 
-def aggregate_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def aggregate_entries(entries: list[dict[str, Any]], occurrence_index: dict[str, list[str]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for e in entries:
         grouped.setdefault(variant_key(e), []).append(e)
@@ -238,6 +296,13 @@ def aggregate_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         agg['variant_count'] = len(group)
         agg['variant_files'] = variants
         agg['all_paths_search'] = ' '.join(v['path'] for v in variants)
+
+        occurrence_pages: set[str] = set()
+        for v in variants:
+            occurrence_pages.update(occurrence_index.get(v['path'], []))
+        agg['occurrence_pages'] = sorted(occurrence_pages)
+        agg['occurrence_count'] = len(occurrence_pages)
+        agg['all_occurrence_pages_search'] = ' '.join(agg['occurrence_pages'])
         aggregated.append(agg)
 
     aggregated.sort(key=lambda e: e['path'])
@@ -295,6 +360,7 @@ def build_html(entries: list[dict[str, Any]], generated_at: str, raw_file_count:
         <th>Main file</th>
         <th>Variants</th>
         <th>Type</th>
+        <th>HTML occurrences</th>
         <th>Size</th>
         <th>Metadata</th>
         <th>SHA-256</th>
@@ -345,6 +411,12 @@ function variantsHtml(e) {{
   }}).join('');
 }}
 
+function occurrencesHtml(e) {{
+  if (!e.occurrence_pages || e.occurrence_pages.length === 0) return '<span class="small">None found</span>';
+  return e.occurrence_pages.map(p => `<div><a href="/${{p}}" target="_blank">${{p}}</a></div>`).join('') +
+    `<div class="small">Total pages: ${{e.occurrence_count}}</div>`;
+}}
+
 function render() {{
   const q = document.getElementById('search').value.toLowerCase().trim();
   const tf = document.getElementById('typeFilter').value;
@@ -354,7 +426,7 @@ function render() {{
     if (tf && !e.mime_type.startsWith(tf) && e.mime_type !== tf) return false;
     if (dupesOnly && (hashCounts.get(e.sha256) || 0) < 2) return false;
     if (!q) return true;
-    return [e.path, e.filename, e.sha256, e.mime_type, e.extension, e.all_paths_search || ''].join(' ').toLowerCase().includes(q);
+    return [e.path, e.filename, e.sha256, e.mime_type, e.extension, e.all_paths_search || '', e.all_occurrence_pages_search || ''].join(' ').toLowerCase().includes(q);
   }});
 
   const rows = filtered.map((e, i) => {{
@@ -365,6 +437,7 @@ function render() {{
       <td class="path"><a href="/${{e.path}}" target="_blank">${{e.path}}</a><div class="small">Filename: ${{e.filename}}</div></td>
       <td class="variants">${{variantsHtml(e)}}<div class="small">Total variants: ${{e.variant_count || 1}}</div></td>
       <td><div>${{e.mime_type}}</div><div class="small">${{e.extension}}</div>${{dupes > 1 ? `<div class="small"><strong>Duplicates:</strong> ${{dupes}}</div>` : ''}}</td>
+      <td class="path">${{occurrencesHtml(e)}}</td>
       <td class="num">${{e.size_bytes.toLocaleString()}} B<div class="small">${{e.size_kb}} KB</div></td>
       <td>${{metadataHtml(e)}}</td>
       <td class="path"><code>${{e.sha256}}</code></td>
@@ -390,9 +463,11 @@ render();
 
 def main() -> None:
     files = gather_files()
+    html_files = gather_html_files()
+    occurrence_index = index_media_occurrences(html_files)
     filtered_files = [p for p in files if not is_likely_design_asset(p)]
     raw_entries = [file_metadata(p) for p in filtered_files]
-    aggregated_entries = aggregate_entries(raw_entries)
+    aggregated_entries = aggregate_entries(raw_entries, occurrence_index)
     generated_at = datetime.now(timezone.utc).isoformat()
     OUTPUT.write_text(build_html(aggregated_entries, generated_at, len(filtered_files)), encoding='utf-8')
     print(
